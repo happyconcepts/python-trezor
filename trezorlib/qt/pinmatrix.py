@@ -1,3 +1,19 @@
+# This file is part of the Trezor project.
+#
+# Copyright (C) 2012-2018 SatoshiLabs and contributors
+#
+# This library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+
 from __future__ import print_function
 import sys
 import math
@@ -25,7 +41,7 @@ class PinButton(QPushButton):
         elif QT_VERSION_STR >= '4':
             QObject.connect(self, SIGNAL('clicked()'), self._pressed)
         else:
-            raise Exception('Unsupported Qt version')
+            raise RuntimeError('Unsupported Qt version')
 
     def _pressed(self):
         self.password.setText(self.password.text() + str(self.encoded_value))
@@ -52,7 +68,7 @@ class PinMatrixWidget(QWidget):
         elif QT_VERSION_STR >= '4':
             QObject.connect(self.password, SIGNAL('textChanged(QString)'), self._password_changed)
         else:
-            raise Exception('Unsupported Qt version')
+            raise RuntimeError('Unsupported Qt version')
 
         self.strength = QLabel()
         self.strength.setMinimumWidth(75)
@@ -123,7 +139,7 @@ if __name__ == '__main__':
     elif QT_VERSION_STR >= '4':
         QObject.connect(ok, SIGNAL('clicked()'), clicked)
     else:
-        raise Exception('Unsupported Qt version')
+        raise RuntimeError('Unsupported Qt version')
 
     vbox = QVBoxLayout()
     vbox.addWidget(matrix)

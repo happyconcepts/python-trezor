@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 from __future__ import print_function
 
 '''
@@ -16,34 +16,28 @@ import hashlib
 import binascii
 
 from trezorlib.client import TrezorClient
-from trezorlib.transport_hid import HidTransport
-
-# Python2 vs Python3
-try:
-    input = raw_input
-except NameError:
-    pass
+from trezorlib.transport import enumerate_devices
 
 
 def wait_for_devices():
-    devices = HidTransport.enumerate()
+    devices = enumerate_devices()
     while not len(devices):
         sys.stderr.write("Please connect TREZOR to computer and press Enter...")
         input()
-        devices = HidTransport.enumerate()
+        devices = enumerate_devices()
 
     return devices
 
 
 def choose_device(devices):
     if not len(devices):
-        raise Exception("No TREZOR connected!")
+        raise RuntimeError("No TREZOR connected!")
 
     if len(devices) == 1:
         try:
             return devices[0]
         except IOError:
-            raise Exception("Device is currently in use")
+            raise RuntimeError("Device is currently in use")
 
     i = 0
     sys.stderr.write("----------------------------\n")
@@ -69,7 +63,7 @@ def choose_device(devices):
         device_id = int(input())
         return devices[device_id]
     except:
-        raise Exception("Invalid choice, exiting...")
+        raise ValueError("Invalid choice, exiting...")
 
 
 def main():
@@ -93,7 +87,7 @@ def main():
         label = input()
 
         sys.stderr.write('Computer asked TREZOR for new strong password.\n')
-        sys.stderr.write('Please confirm action on your device.\n')
+        sys.stderr.write('Please confirm the action on your device ...\n')
 
         # 32 bytes, good for AES
         trezor_entropy = client.get_entropy(32)
@@ -101,21 +95,21 @@ def main():
         passw = hashlib.sha256(trezor_entropy + urandom_entropy).digest()
 
         if len(passw) != 32:
-            raise Exception("32 bytes password expected")
+            raise ValueError("32 bytes password expected")
 
         bip32_path = [10, 0]
         passw_encrypted = client.encrypt_keyvalue(bip32_path, label, passw, False, True)
 
         data = {'label': label,
                 'bip32_path': bip32_path,
-                'password_encrypted_hex': binascii.hexlify(passw_encrypted)}
+                'password_encrypted_hex': binascii.hexlify(passw_encrypted).decode('ascii')}
 
-        json.dump(data, open(passw_file, 'wb'))
+        json.dump(data, open(passw_file, 'w'))
 
     # Let's load password
     data = json.load(open(passw_file, 'r'))
 
-    sys.stderr.write('Please confirm action on your device.\n')
+    sys.stderr.write('Please confirm the action on your device ...\n')
     passw = client.decrypt_keyvalue(data['bip32_path'],
                                     data['label'],
                                     binascii.unhexlify(data['password_encrypted_hex']),

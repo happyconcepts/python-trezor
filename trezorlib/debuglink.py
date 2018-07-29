@@ -1,24 +1,22 @@
-# This file is part of the TREZOR project.
+# This file is part of the Trezor project.
 #
-# Copyright (C) 2012-2016 Marek Palatinus <slush@satoshilabs.com>
-# Copyright (C) 2012-2016 Pavol Rusnak <stick@satoshilabs.com>
+# Copyright (C) 2012-2018 SatoshiLabs and contributors
 #
 # This library is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
 #
 # This library is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Lesser General Public License for more details.
 #
-# You should have received a copy of the GNU Lesser General Public License
-# along with this library.  If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
 from __future__ import print_function
 
-from . import messages_pb2 as proto
+from . import messages as proto
 
 
 def pin_info(pin):
@@ -27,10 +25,6 @@ def pin_info(pin):
 
 def button_press(yes_no):
     print("User pressed", '"y"' if yes_no else '"n"')
-
-
-def pprint(msg):
-    return "<%s> (%d bytes):\n%s" % (msg.__class__.__name__, msg.ByteSize(), msg)
 
 
 class DebugLink(object):
@@ -45,12 +39,10 @@ class DebugLink(object):
         self.transport.session_end()
 
     def _call(self, msg, nowait=False):
-        print("DEBUGLINK SEND", pprint(msg))
         self.transport.write(msg)
         if nowait:
-            return
+            return None
         ret = self.transport.read()
-        print("DEBUGLINK RECV", pprint(ret))
         return ret
 
     def read_pin(self):
@@ -98,6 +90,10 @@ class DebugLink(object):
         obj = self._call(proto.DebugLinkGetState())
         return obj.reset_word
 
+    def read_reset_word_pos(self):
+        obj = self._call(proto.DebugLinkGetState())
+        return obj.reset_word_pos
+
     def read_reset_entropy(self):
         obj = self._call(proto.DebugLinkGetState())
         return obj.reset_entropy
@@ -116,6 +112,19 @@ class DebugLink(object):
 
     def press_no(self):
         self.press_button(False)
+
+    def swipe(self, up_down):
+        print("Swiping", up_down)
+        self._call(proto.DebugLinkDecision(up_down=up_down), nowait=True)
+
+    def swipe_up(self):
+        self.swipe(True)
+
+    def swipe_down(self):
+        self.swipe(False)
+
+    def input(self, text):
+        self._call(proto.DebugLinkDecision(input=text), nowait=True)
 
     def stop(self):
         self._call(proto.DebugLinkStop(), nowait=True)

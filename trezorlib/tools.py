@@ -1,40 +1,41 @@
-# This file is part of the TREZOR project.
+# This file is part of the Trezor project.
 #
-# Copyright (C) 2012-2016 Marek Palatinus <slush@satoshilabs.com>
-# Copyright (C) 2012-2016 Pavol Rusnak <stick@satoshilabs.com>
-# Copyright (C) 2016      Jochen Hoenicke <hoenicke@gmail.com>
+# Copyright (C) 2012-2018 SatoshiLabs and contributors
 #
 # This library is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
 #
 # This library is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Lesser General Public License for more details.
 #
-# You should have received a copy of the GNU Lesser General Public License
-# along with this library.  If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
 import hashlib
-import binascii
 import struct
-import sys
+from typing import NewType, List
 
-if sys.version_info < (3,):
-    def byteindex(data, index):
-        return ord(data[index])
+from .coins import slip44
 
-    def iterbytes(data):
-        return (ord(char) for char in data)
-else:
-    def byteindex(data, index):
-        return data[index]
-    iterbytes = iter
+HARDENED_FLAG = 1 << 31
+
+Address = NewType('Address', List[int])
 
 
-def Hash(data):
+def H_(x: int) -> int:
+    """
+    Shortcut function that "hardens" a number in a BIP44 path.
+    """
+    return x | HARDENED_FLAG
+
+
+def btc_hash(data):
+    """
+    Double-SHA256 hash as used in BTC
+    """
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
 
@@ -46,15 +47,15 @@ def hash_160(public_key):
 
 def hash_160_to_bc_address(h160, address_type):
     vh160 = struct.pack('<B', address_type) + h160
-    h = Hash(vh160)
+    h = btc_hash(vh160)
     addr = vh160 + h[0:4]
     return b58encode(addr)
 
 
 def compress_pubkey(public_key):
-    if byteindex(public_key, 0) == 4:
-        return bytes((byteindex(public_key, 64) & 1) + 2) + public_key[1:33]
-    raise Exception("Pubkey is already compressed")
+    if public_key[0] == 4:
+        return bytes((public_key[64] & 1) + 2) + public_key[1:33]
+    raise ValueError("Pubkey is already compressed")
 
 
 def public_key_to_bc_address(public_key, address_type, compress=True):
@@ -73,7 +74,7 @@ def b58encode(v):
     """ encode v, which is a string of bytes, to base58."""
 
     long_value = 0
-    for c in iterbytes(v):
+    for c in v:
         long_value = long_value * 256 + c
 
     result = ''
@@ -86,7 +87,7 @@ def b58encode(v):
     # Bitcoin does a little leading-zero-compression:
     # leading 0-bytes in the input become leading-1s
     nPad = 0
-    for c in iterbytes(v):
+    for c in v:
         if c == 0:
             nPad += 1
         else:
@@ -122,17 +123,39 @@ def b58decode(v, length):
     return result
 
 
-def monkeypatch_google_protobuf_text_format():
-    # monkeypatching: text formatting of protobuf messages
-    import google.protobuf.text_format
-    import google.protobuf.descriptor
+def parse_path(nstr: str) -> Address:
+    """
+    Convert BIP32 path string to list of uint32 integers with hardened flags.
+    Several conventions are supported to set the hardened flag: -1, 1', 1h
 
-    _oldPrintFieldValue = google.protobuf.text_format.PrintFieldValue
+    e.g.: "0/1h/1" -> [0, 0x80000001, 1]
 
-    def _customPrintFieldValue(field, value, out, indent=0, as_utf8=False, as_one_line=False, pointy_brackets=False, float_format=None):
-        if field.type == google.protobuf.descriptor.FieldDescriptor.TYPE_BYTES:
-            _oldPrintFieldValue(field, 'hex(%s)' % binascii.hexlify(value), out, indent, as_utf8, as_one_line)
+    :param nstr: path string
+    :return: list of integers
+    """
+    if not nstr:
+        return []
+
+    n = nstr.split('/')
+
+    # m/a/b/c => a/b/c
+    if n[0] == 'm':
+        n = n[1:]
+
+    # coin_name/a/b/c => 44'/SLIP44_constant'/a/b/c
+    if n[0] in slip44:
+        coin_id = slip44[n[0]]
+        n[0:1] = ['44h', '{}h'.format(coin_id)]
+
+    def str_to_harden(x: str) -> int:
+        if x.startswith('-'):
+            return H_(abs(int(x)))
+        elif x.endswith(('h', "'")):
+            return H_(int(x[:-1]))
         else:
-            _oldPrintFieldValue(field, value, out, indent, as_utf8, as_one_line)
+            return int(x)
 
-    google.protobuf.text_format.PrintFieldValue = _customPrintFieldValue
+    try:
+        return list(str_to_harden(x) for x in n)
+    except Exception:
+        raise ValueError('Invalid BIP32 path', nstr)

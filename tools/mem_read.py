@@ -1,9 +1,7 @@
-#!/usr/bin/env python
-from __future__ import print_function
-
+#!/usr/bin/env python3
 from trezorlib.debuglink import DebugLink
 from trezorlib.client import TrezorClient
-from trezorlib.transport_hid import HidTransport
+from trezorlib.transport import enumerate_devices
 import sys
 
 # usage examples
@@ -16,8 +14,8 @@ import sys
 
 
 def main():
-    # List all connected TREZORs on USB
-    devices = HidTransport.enumerate()
+    # List all debuggable TREZORs
+    devices = [device for device in enumerate_devices() if hasattr(device, 'find_debug')]
 
     # Check whether we found any
     if len(devices) == 0:
@@ -36,7 +34,7 @@ def main():
     arg2 = int(sys.argv[2], 16)
     step = 0x400 if arg2 >= 0x400 else arg2
 
-    f = open('memory.dat', 'w')
+    f = open('memory.dat', 'wb')
 
     for addr in range(arg1, arg1 + arg2, step):
         mem = debug.memory_read(addr, step)

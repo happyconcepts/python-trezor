@@ -1,34 +1,49 @@
-# This file is part of the TREZOR project.
+# This file is part of the Trezor project.
 #
-# Copyright (C) 2012-2016 Marek Palatinus <slush@satoshilabs.com>
-# Copyright (C) 2012-2016 Pavol Rusnak <stick@satoshilabs.com>
+# Copyright (C) 2012-2018 SatoshiLabs and contributors
 #
 # This library is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# it under the terms of the GNU Lesser General Public License version 3
+# as published by the Free Software Foundation.
 #
 # This library is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Lesser General Public License for more details.
 #
-# You should have received a copy of the GNU Lesser General Public License
-# along with this library.  If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the License along with this library.
+# If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
-from . import messages_pb2 as proto
+from . import messages
+from . import protobuf
 
 map_type_to_class = {}
 map_class_to_type = {}
 
 
 def build_map():
-    for msg_type, i in proto.MessageType.items():
-        msg_name = msg_type.replace('MessageType_', '')
-        msg_class = getattr(proto, msg_name)
+    for msg_name in dir(messages.MessageType):
+        if msg_name.startswith('__'):
+            continue
 
-        map_type_to_class[i] = msg_class
-        map_class_to_type[msg_class] = i
+        try:
+            msg_class = getattr(messages, msg_name)
+        except AttributeError:
+            raise ValueError("Implementation of protobuf message '%s' is missing" % msg_name)
+
+        if msg_class.MESSAGE_WIRE_TYPE != getattr(messages.MessageType, msg_name):
+            raise ValueError("Inconsistent wire type and MessageType record for '%s'" % msg_class)
+
+        register_message(msg_class)
+
+
+def register_message(msg_class):
+    if msg_class.MESSAGE_WIRE_TYPE in map_type_to_class:
+        raise Exception("Message for wire type %s is already registered by %s" %
+                        (msg_class.MESSAGE_WIRE_TYPE, get_class(msg_class.MESSAGE_WIRE_TYPE)))
+
+    map_class_to_type[msg_class] = msg_class.MESSAGE_WIRE_TYPE
+    map_type_to_class[msg_class.MESSAGE_WIRE_TYPE] = msg_class
 
 
 def get_type(msg):
@@ -39,17 +54,4 @@ def get_class(t):
     return map_type_to_class[t]
 
 
-def check_missing():
-    from google.protobuf import reflection
-
-    types = [getattr(proto, item) for item in dir(proto)
-             if issubclass(getattr(proto, item).__class__, reflection.GeneratedProtocolMessageType)]
-
-    missing = list(set(types) - set(map_type_to_class.values()))
-
-    if len(missing):
-        raise Exception("Following protobuf messages are not defined in mapping: %s" % missing)
-
-
 build_map()
-check_missing()
