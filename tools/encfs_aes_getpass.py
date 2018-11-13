@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import print_function
-
 '''
 Use TREZOR as a hardware key for opening EncFS filesystem!
 
@@ -13,10 +11,10 @@ import os
 import sys
 import json
 import hashlib
-import binascii
 
 from trezorlib.client import TrezorClient
 from trezorlib.transport import enumerate_devices
+from trezorlib.ui import ClickUI
 
 
 def wait_for_devices():
@@ -44,7 +42,7 @@ def choose_device(devices):
     sys.stderr.write("Available devices:\n")
     for d in devices:
         try:
-            client = TrezorClient(d)
+            client = TrezorClient(d, ui=ClickUI)
         except IOError:
             sys.stderr.write("[-] <device is currently in use>\n")
             continue
@@ -62,7 +60,7 @@ def choose_device(devices):
     try:
         device_id = int(input())
         return devices[device_id]
-    except:
+    except Exception:
         raise ValueError("Invalid choice, exiting...")
 
 
@@ -75,7 +73,7 @@ def main():
 
     devices = wait_for_devices()
     transport = choose_device(devices)
-    client = TrezorClient(transport)
+    client = TrezorClient(transport, ui=ClickUI)
 
     rootdir = os.environ['encfs_root']  # Read "man encfs" for more
     passw_file = os.path.join(rootdir, 'password.dat')
@@ -102,7 +100,7 @@ def main():
 
         data = {'label': label,
                 'bip32_path': bip32_path,
-                'password_encrypted_hex': binascii.hexlify(passw_encrypted).decode('ascii')}
+                'password_encrypted_hex': passw_encrypted.hex()}
 
         json.dump(data, open(passw_file, 'w'))
 
@@ -112,7 +110,7 @@ def main():
     sys.stderr.write('Please confirm the action on your device ...\n')
     passw = client.decrypt_keyvalue(data['bip32_path'],
                                     data['label'],
-                                    binascii.unhexlify(data['password_encrypted_hex']),
+                                    bytes.fromhex(data['password_encrypted_hex']),
                                     False, True)
 
     print(passw)

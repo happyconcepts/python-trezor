@@ -15,93 +15,167 @@
 # If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
 import logging
-import requests
-import binascii
-from io import BytesIO
 import struct
+from io import BytesIO
+from typing import Any, Dict, Iterable, Optional
 
-from .. import mapping
-from .. import messages
-from .. import protobuf
+import requests
+
 from . import Transport, TransportException
+from .. import mapping, protobuf
+
+if False:
+    # mark Optional as used, otherwise it only exists in comments
+    Optional
 
 LOG = logging.getLogger(__name__)
 
-TREZORD_HOST = 'http://127.0.0.1:21325'
+TREZORD_HOST = "http://127.0.0.1:21325"
+TREZORD_ORIGIN_HEADER = {"Origin": "https://python.trezor.io"}
+
+TREZORD_VERSION_MODERN = (2, 0, 25)
+
+CONNECTION = requests.Session()
+CONNECTION.headers.update(TREZORD_ORIGIN_HEADER)
 
 
-def get_error(resp):
-    return ' (error=%d str=%s)' % (resp.status_code, resp.json()['error'])
+def call_bridge(uri: str, data=None) -> requests.Response:
+    url = TREZORD_HOST + "/" + uri
+    r = CONNECTION.post(url, data=data)
+    if r.status_code != 200:
+        error_str = "trezord: {} failed with code {}: {}".format(
+            uri, r.status_code, r.json()["error"]
+        )
+        raise TransportException(error_str)
+    return r
+
+
+def is_legacy_bridge() -> bool:
+    config = call_bridge("configure").json()
+    version_tuple = tuple(map(int, config["version"].split(".")))
+    return version_tuple < TREZORD_VERSION_MODERN
+
+
+class BridgeHandle:
+    def __init__(self, transport: "BridgeTransport") -> None:
+        self.transport = transport
+
+    def read_buf(self) -> bytes:
+        raise NotImplementedError
+
+    def write_buf(self, buf: bytes) -> None:
+        raise NotImplementedError
+
+
+class BridgeHandleModern(BridgeHandle):
+    def write_buf(self, buf: bytes) -> None:
+        self.transport._call("post", data=buf.hex())
+
+    def read_buf(self) -> bytes:
+        data = self.transport._call("read")
+        return bytes.fromhex(data.text)
+
+
+class BridgeHandleLegacy(BridgeHandle):
+    def __init__(self, transport: "BridgeTransport") -> None:
+        super().__init__(transport)
+        self.request = None  # type: Optional[str]
+
+    def write_buf(self, buf: bytes) -> None:
+        if self.request is not None:
+            raise TransportException("Can't write twice on legacy Bridge")
+        self.request = buf.hex()
+
+    def read_buf(self) -> bytes:
+        if self.request is None:
+            raise TransportException("Can't read without write on legacy Bridge")
+        try:
+            data = self.transport._call("call", data=self.request)
+            return bytes.fromhex(data.text)
+        finally:
+            self.request = None
 
 
 class BridgeTransport(Transport):
-    '''
+    """
     BridgeTransport implements transport through TREZOR Bridge (aka trezord).
-    '''
+    """
 
-    PATH_PREFIX = 'bridge'
-    HEADERS = {'Origin': 'https://python.trezor.io'}
+    PATH_PREFIX = "bridge"
 
-    def __init__(self, device):
-        super().__init__()
+    def __init__(
+        self, device: Dict[str, Any], legacy: bool, debug: bool = False
+    ) -> None:
+        if legacy and debug:
+            raise TransportException("Debugging not supported on legacy Bridge")
 
         self.device = device
-        self.conn = requests.Session()
-        self.session = None
-        self.response = None
+        self.session = None  # type: Optional[str]
+        self.debug = debug
+        self.legacy = legacy
 
-    def get_path(self):
-        return '%s:%s' % (self.PATH_PREFIX, self.device['path'])
+        if legacy:
+            self.handle = BridgeHandleLegacy(self)  # type: BridgeHandle
+        else:
+            self.handle = BridgeHandleModern(self)
+
+    def get_path(self) -> str:
+        return "%s:%s" % (self.PATH_PREFIX, self.device["path"])
+
+    def find_debug(self) -> "BridgeTransport":
+        if not self.device.get("debug"):
+            raise TransportException("Debug device not available")
+        return BridgeTransport(self.device, self.legacy, debug=True)
+
+    def _call(self, action: str, data: str = None) -> requests.Response:
+        session = self.session or "null"
+        uri = action + "/" + str(session)
+        if self.debug:
+            uri = "debug/" + uri
+        return call_bridge(uri, data=data)
 
     @classmethod
-    def enumerate(cls):
+    def enumerate(cls) -> Iterable["BridgeTransport"]:
         try:
-            r = requests.post(TREZORD_HOST + '/enumerate', headers=cls.HEADERS)
-            if r.status_code != 200:
-                raise TransportException('trezord: Could not enumerate devices' + get_error(r))
-            return [BridgeTransport(dev) for dev in r.json()]
-        except:
+            legacy = is_legacy_bridge()
+            return [
+                BridgeTransport(dev, legacy) for dev in call_bridge("enumerate").json()
+            ]
+        except Exception:
             return []
 
-    def open(self):
-        r = self.conn.post(TREZORD_HOST + '/acquire/%s/null' % self.device['path'], headers=self.HEADERS)
-        if r.status_code != 200:
-            raise TransportException('trezord: Could not acquire session' + get_error(r))
-        self.session = r.json()['session']
+    def begin_session(self) -> None:
+        data = self._call("acquire/" + self.device["path"])
+        self.session = data.json()["session"]
 
-    def close(self):
+    def end_session(self) -> None:
         if not self.session:
             return
-        r = self.conn.post(TREZORD_HOST + '/release/%s' % self.session, headers=self.HEADERS)
-        if r.status_code != 200:
-            raise TransportException('trezord: Could not release session' + get_error(r))
+        self._call("release")
         self.session = None
 
-    def write(self, msg):
-        LOG.debug("sending message: {}".format(msg.__class__.__name__),
-                  extra={'protobuf': msg})
-        data = BytesIO()
-        protobuf.dump_message(data, msg)
-        ser = data.getvalue()
+    def write(self, msg: protobuf.MessageType) -> None:
+        LOG.debug(
+            "sending message: {}".format(msg.__class__.__name__),
+            extra={"protobuf": msg},
+        )
+        buffer = BytesIO()
+        protobuf.dump_message(buffer, msg)
+        ser = buffer.getvalue()
         header = struct.pack(">HL", mapping.get_type(msg), len(ser))
-        data = binascii.hexlify(header + ser).decode()
-        r = self.conn.post(
-            TREZORD_HOST + '/call/%s' % self.session, data=data, headers=self.HEADERS)
-        if r.status_code != 200:
-            raise TransportException('trezord: Could not write message' + get_error(r))
-        self.response = r.text
 
-    def read(self):
-        if self.response is None:
-            raise TransportException('No response stored')
-        data = binascii.unhexlify(self.response)
-        headerlen = struct.calcsize('>HL')
-        (msg_type, datalen) = struct.unpack('>HL', data[:headerlen])
-        data = BytesIO(data[headerlen:headerlen + datalen])
-        msg = protobuf.load_message(data, mapping.get_class(msg_type))
-        LOG.debug("received message: {}".format(msg.__class__.__name__),
-                  extra={'protobuf': msg})
-        self.response = None
+        self.handle.write_buf(header + ser)
+
+    def read(self) -> protobuf.MessageType:
+        data = self.handle.read_buf()
+        headerlen = struct.calcsize(">HL")
+        msg_type, datalen = struct.unpack(">HL", data[:headerlen])
+        buffer = BytesIO(data[headerlen : headerlen + datalen])
+        msg = protobuf.load_message(buffer, mapping.get_class(msg_type))
+        LOG.debug(
+            "received message: {}".format(msg.__class__.__name__),
+            extra={"protobuf": msg},
+        )
         return msg
 
 

@@ -14,9 +14,10 @@
 # You should have received a copy of the License along with this library.
 # If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
-import binascii
 import json
+
 from . import messages as proto
+from .tools import CallException, expect
 
 TYPE_TRANSACTION_TRANSFER = 0x0101
 TYPE_IMPORTANCE_TRANSFER = 0x0801
@@ -36,7 +37,7 @@ def create_transaction_common(transaction):
     msg.deadline = transaction["deadline"]
 
     if "signer" in transaction:
-        msg.signer = binascii.unhexlify(transaction["signer"])
+        msg.signer = bytes.fromhex(transaction["signer"])
 
     return msg
 
@@ -47,27 +48,33 @@ def create_transfer(transaction):
     msg.amount = transaction["amount"]
 
     if "payload" in transaction["message"]:
-        msg.payload = binascii.unhexlify(transaction["message"]["payload"])
+        msg.payload = bytes.fromhex(transaction["message"]["payload"])
 
         if transaction["message"]["type"] == 0x02:
-            msg.public_key = binascii.unhexlify(transaction["message"]["publicKey"])
+            msg.public_key = bytes.fromhex(transaction["message"]["publicKey"])
 
     if "mosaics" in transaction:
-        msg.mosaics = [proto.NEMMosaic(
-            namespace=mosaic["mosaicId"]["namespaceId"],
-            mosaic=mosaic["mosaicId"]["name"],
-            quantity=mosaic["quantity"],
-        ) for mosaic in transaction["mosaics"]]
+        msg.mosaics = [
+            proto.NEMMosaic(
+                namespace=mosaic["mosaicId"]["namespaceId"],
+                mosaic=mosaic["mosaicId"]["name"],
+                quantity=mosaic["quantity"],
+            )
+            for mosaic in transaction["mosaics"]
+        ]
 
     return msg
 
 
 def create_aggregate_modification(transactions):
     msg = proto.NEMAggregateModification()
-    msg.modifications = [proto.NEMCosignatoryModification(
-        type=modification["modificationType"],
-        public_key=binascii.unhexlify(modification["cosignatoryAccount"]),
-    ) for modification in transactions["modifications"]]
+    msg.modifications = [
+        proto.NEMCosignatoryModification(
+            type=modification["modificationType"],
+            public_key=bytes.fromhex(modification["cosignatoryAccount"]),
+        )
+        for modification in transactions["modifications"]
+    ]
 
     if "minCosignatories" in transactions:
         msg.relative_change = transactions["minCosignatories"]["relativeChange"]
@@ -133,21 +140,11 @@ def create_supply_change(transaction):
 def create_importance_transfer(transaction):
     msg = proto.NEMImportanceTransfer()
     msg.mode = transaction["importanceTransfer"]["mode"]
-    msg.public_key = binascii.unhexlify(transaction["importanceTransfer"]["publicKey"])
+    msg.public_key = bytes.fromhex(transaction["importanceTransfer"]["publicKey"])
     return msg
 
 
-def create_sign_tx(transaction):
-    msg = proto.NEMSignTx()
-    msg.transaction = create_transaction_common(transaction)
-    msg.cosigning = (transaction["type"] == TYPE_MULTISIG_SIGNATURE)
-
-    if transaction["type"] in (TYPE_MULTISIG_SIGNATURE, TYPE_MULTISIG):
-        transaction = transaction["otherTrans"]
-        msg.multisig = create_transaction_common(transaction)
-    elif "otherTrans" in transaction:
-        raise ValueError("Transaction does not support inner transaction")
-
+def fill_transaction_by_type(msg, transaction):
     if transaction["type"] == TYPE_TRANSACTION_TRANSFER:
         msg.transfer = create_transfer(transaction)
     elif transaction["type"] == TYPE_AGGREGATE_MODIFICATION:
@@ -163,4 +160,41 @@ def create_sign_tx(transaction):
     else:
         raise ValueError("Unknown transaction type")
 
+
+def create_sign_tx(transaction):
+    msg = proto.NEMSignTx()
+    msg.transaction = create_transaction_common(transaction)
+    msg.cosigning = transaction["type"] == TYPE_MULTISIG_SIGNATURE
+
+    if transaction["type"] in (TYPE_MULTISIG_SIGNATURE, TYPE_MULTISIG):
+        other_trans = transaction["otherTrans"]
+        msg.multisig = create_transaction_common(other_trans)
+        fill_transaction_by_type(msg, other_trans)
+    elif "otherTrans" in transaction:
+        raise ValueError("Transaction does not support inner transaction")
+    else:
+        fill_transaction_by_type(msg, transaction)
+
     return msg
+
+
+# ====== Client functions ====== #
+
+
+@expect(proto.NEMAddress, field="address")
+def get_address(client, n, network, show_display=False):
+    return client.call(
+        proto.NEMGetAddress(address_n=n, network=network, show_display=show_display)
+    )
+
+
+@expect(proto.NEMSignedTx)
+def sign_tx(client, n, transaction):
+    try:
+        msg = create_sign_tx(transaction)
+    except ValueError as e:
+        raise CallException(e.args)
+
+    assert msg.transaction is not None
+    msg.transaction.address_n = n
+    return client.call(msg)

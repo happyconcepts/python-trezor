@@ -14,12 +14,11 @@
 # You should have received a copy of the License along with this library.
 # If not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
 
-import sys
 from functools import reduce
-import binascii
-from typing import Iterable, Tuple
+from typing import Iterable, List, Tuple
 
-from trezorlib import _ed25519
+from . import _ed25519, messages
+from .tools import expect
 
 # XXX, these could be NewType's, but that would infect users of the cosi module with these types as well.
 # Unsure if we want that.
@@ -31,11 +30,13 @@ Ed25519Signature = bytes
 def combine_keys(pks: Iterable[Ed25519PublicPoint]) -> Ed25519PublicPoint:
     """Combine a list of Ed25519 points into a "global" CoSi key."""
     P = [_ed25519.decodepoint(pk) for pk in pks]
-    combine = reduce(_ed25519.edwards, P)
+    combine = reduce(_ed25519.edwards_add, P)
     return Ed25519PublicPoint(_ed25519.encodepoint(combine))
 
 
-def combine_sig(global_R: Ed25519PublicPoint, sigs: Iterable[Ed25519Signature]) -> Ed25519Signature:
+def combine_sig(
+    global_R: Ed25519PublicPoint, sigs: Iterable[Ed25519Signature]
+) -> Ed25519Signature:
     """Combine a list of signatures into a single CoSi signature."""
     S = [_ed25519.decodeint(si) for si in sigs]
     s = sum(S) % _ed25519.l
@@ -43,7 +44,9 @@ def combine_sig(global_R: Ed25519PublicPoint, sigs: Iterable[Ed25519Signature]) 
     return Ed25519Signature(sig)
 
 
-def get_nonce(sk: Ed25519PrivateKey, data: bytes, ctr: int = 0) -> Tuple[int, Ed25519PublicPoint]:
+def get_nonce(
+    sk: Ed25519PrivateKey, data: bytes, ctr: int = 0
+) -> Tuple[int, Ed25519PublicPoint]:
     """Calculate CoSi nonces for given data.
     These differ from Ed25519 deterministic nonces in that there is a counter appended at end.
 
@@ -54,35 +57,82 @@ def get_nonce(sk: Ed25519PrivateKey, data: bytes, ctr: int = 0) -> Tuple[int, Ed
     `R` should be combined with other partial signatures through :func:`combine_keys`
     to obtain a "global commitment".
     """
+    # r = hash(hash(sk)[b .. 2b] + M + ctr)
+    # R = rB
     h = _ed25519.H(sk)
-    b = _ed25519.b
-    r = _ed25519.Hint(bytes([h[i] for i in range(b >> 3, b >> 2)]) + data + binascii.unhexlify('%08x' % ctr))
+    bytesize = _ed25519.b // 8
+    assert len(h) == bytesize * 2
+    r = _ed25519.Hint(h[bytesize:] + data + ctr.to_bytes(4, "big"))
     R = _ed25519.scalarmult(_ed25519.B, r)
     return r, Ed25519PublicPoint(_ed25519.encodepoint(R))
 
 
-def verify(signature: Ed25519Signature, digest: bytes, pub_key: Ed25519PublicPoint) -> None:
+def verify(
+    signature: Ed25519Signature, digest: bytes, pub_key: Ed25519PublicPoint
+) -> None:
     """Verify Ed25519 signature. Raise exception if the signature is invalid."""
     # XXX this *might* change to bool function
     _ed25519.checkvalid(signature, digest, pub_key)
+
+
+def verify_m_of_n(
+    signature: Ed25519Signature,
+    digest: bytes,
+    m: int,
+    n: int,
+    mask: int,
+    keys: List[Ed25519PublicPoint],
+) -> None:
+    if m < 1:
+        raise ValueError("At least 1 signer must be specified")
+    selected_keys = [keys[i] for i in range(n) if mask & (1 << i)]
+    if len(selected_keys) < m:
+        raise ValueError(
+            "Not enough signers ({} required, {} found)".format(m, len(selected_keys))
+        )
+    global_pk = combine_keys(selected_keys)
+    return verify(signature, digest, global_pk)
 
 
 def pubkey_from_privkey(privkey: Ed25519PrivateKey) -> Ed25519PublicPoint:
     """Interpret 32 bytes of data as an Ed25519 private key.
      Calculate and return the corresponding public key.
      """
-    return Ed25519PublicPoint(_ed25519.publickey(privkey))
+    return Ed25519PublicPoint(_ed25519.publickey_unsafe(privkey))
 
 
-def sign_with_privkey(digest: bytes, privkey: Ed25519PrivateKey,
-                      global_pubkey: Ed25519PublicPoint,
-                      nonce: int,
-                      global_commit: Ed25519PublicPoint) -> Ed25519Signature:
+def sign_with_privkey(
+    digest: bytes,
+    privkey: Ed25519PrivateKey,
+    global_pubkey: Ed25519PublicPoint,
+    nonce: int,
+    global_commit: Ed25519PublicPoint,
+) -> Ed25519Signature:
     """Create a CoSi signature of `digest` with the supplied private key.
     This function needs to know the global public key and global commitment.
     """
     h = _ed25519.H(privkey)
-    b = _ed25519.b
-    a = 2 ** (b - 2) + sum(2 ** i * _ed25519.bit(h, i) for i in range(3, b - 2))
+    a = _ed25519.decodecoord(h)
+
     S = (nonce + _ed25519.Hint(global_commit + global_pubkey + digest) * a) % _ed25519.l
     return Ed25519Signature(_ed25519.encodeint(S))
+
+
+# ====== Client functions ====== #
+
+
+@expect(messages.CosiCommitment)
+def commit(client, n, data):
+    return client.call(messages.CosiCommit(address_n=n, data=data))
+
+
+@expect(messages.CosiSignature)
+def sign(client, n, data, global_commitment, global_pubkey):
+    return client.call(
+        messages.CosiSign(
+            address_n=n,
+            data=data,
+            global_commitment=global_commitment,
+            global_pubkey=global_pubkey,
+        )
+    )

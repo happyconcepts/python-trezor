@@ -37,7 +37,6 @@ required:
 >>>         """
 '''
 
-import binascii
 from io import BytesIO
 from typing import Any, Optional
 
@@ -89,6 +88,7 @@ def dump_uvarint(writer, n):
 # But this is harder in Python because we don't natively know the bit size of the number.
 # So we have to branch on whether the number is negative.
 
+
 def sint_to_uint(sint):
     res = sint << 1
     if sint < 0:
@@ -126,7 +126,10 @@ class UnicodeType:
 
 class MessageType:
     WIRE_TYPE = 2
-    FIELDS = {}
+
+    @classmethod
+    def get_fields(cls):
+        return {}
 
     def __init__(self, **kwargs):
         for kw in kwargs:
@@ -134,8 +137,7 @@ class MessageType:
         self._fill_missing()
 
     def __eq__(self, rhs):
-        return (self.__class__ is rhs.__class__ and
-                self.__dict__ == rhs.__dict__)
+        return self.__class__ is rhs.__class__ and self.__dict__ == rhs.__dict__
 
     def __repr__(self):
         d = {}
@@ -143,55 +145,20 @@ class MessageType:
             if value is None or value == []:
                 continue
             d[key] = value
-        return '<%s: %s>' % (self.__class__.__name__, d)
+        return "<%s: %s>" % (self.__class__.__name__, d)
 
     def __iter__(self):
-        return self.__dict__.__iter__()
+        return iter(self.keys())
 
-    def __getattr__(self, attr):
-        if attr.startswith('_add_'):
-            return self._additem(attr[5:])
+    def keys(self):
+        return (name for name, _, _ in self.get_fields().values())
 
-        if attr.startswith('_extend_'):
-            return self._extenditem(attr[8:])
-
-        raise AttributeError(attr)
-
-    def _extenditem(self, attr):
-        def f(param):
-            try:
-                l = getattr(self, attr)
-            except AttributeError:
-                l = []
-                setattr(self, attr, l)
-
-            l += param
-
-        return f
-
-    def _additem(self, attr):
-        # Add new item for repeated field type
-        for v in self.FIELDS.values():
-            if v[0] != attr:
-                continue
-            if not (v[2] & FLAG_REPEATED):
-                raise AttributeError
-
-            try:
-                l = getattr(self, v[0])
-            except AttributeError:
-                l = []
-                setattr(self, v[0], l)
-
-            item = v[1]()
-            l.append(item)
-            return lambda: item
-
-        raise AttributeError
+    def __getitem__(self, key):
+        return getattr(self, key)
 
     def _fill_missing(self):
         # fill missing fields
-        for fname, ftype, fflags in self.FIELDS.values():
+        for fname, ftype, fflags in self.get_fields().values():
             if not hasattr(self, fname):
                 if fflags & FLAG_REPEATED:
                     setattr(self, fname, [])
@@ -208,7 +175,6 @@ class MessageType:
 
 
 class LimitedReader:
-
     def __init__(self, reader, limit):
         self.reader = reader
         self.limit = limit
@@ -223,7 +189,6 @@ class LimitedReader:
 
 
 class CountingWriter:
-
     def __init__(self):
         self.size = 0
 
@@ -237,7 +202,7 @@ FLAG_REPEATED = 1
 
 
 def load_message(reader, msg_type):
-    fields = msg_type.FIELDS
+    fields = msg_type.get_fields()
     msg = msg_type()
 
     while True:
@@ -298,7 +263,7 @@ def load_message(reader, msg_type):
 def dump_message(writer, msg):
     repvalue = [0]
     mtype = msg.__class__
-    fields = mtype.FIELDS
+    fields = mtype.get_fields()
 
     for ftag in fields:
         fname, ftype, fflags = fields[ftag]
@@ -331,7 +296,7 @@ def dump_message(writer, msg):
 
             elif ftype is UnicodeType:
                 if not isinstance(svalue, bytes):
-                    svalue = svalue.encode('utf-8')
+                    svalue = svalue.encode()
 
                 dump_uvarint(writer, len(svalue))
                 writer.write(svalue)
@@ -346,16 +311,17 @@ def dump_message(writer, msg):
                 raise TypeError
 
 
-def format_message(pb: MessageType,
-                   indent: int = 0,
-                   sep: str = ' ' * 4,
-                   truncate_after: Optional[int] = 256,
-                   truncate_to: Optional[int] = 64) -> str:
-
+def format_message(
+    pb: MessageType,
+    indent: int = 0,
+    sep: str = " " * 4,
+    truncate_after: Optional[int] = 256,
+    truncate_to: Optional[int] = 64,
+) -> str:
     def mostly_printable(bytes):
         if not bytes:
             return True
-        printable = sum(1 for byte in bytes if 0x20 <= byte <= 0x7e)
+        printable = sum(1 for byte in bytes if 0x20 <= byte <= 0x7E)
         return printable / len(bytes) > 0.8
 
     def pformat_value(value: Any, indent: int) -> str:
@@ -369,33 +335,91 @@ def format_message(pb: MessageType,
                 return repr(value)
 
             # long list, one line per entry
-            lines = ['[', level + ']']
-            lines[1:1] = [leadin + pformat_value(x, indent + 1) + ',' for x in value]
-            return '\n'.join(lines)
+            lines = ["[", level + "]"]
+            lines[1:1] = [leadin + pformat_value(x, indent + 1) + "," for x in value]
+            return "\n".join(lines)
         if isinstance(value, dict):
-            lines = ['{']
+            lines = ["{"]
             for key, val in sorted(value.items()):
                 if val is None or val == []:
                     continue
-                lines.append(leadin + key + ': ' + pformat_value(val, indent + 1) + ',')
-            lines.append(level + '}')
-            return '\n'.join(lines)
+                lines.append(leadin + key + ": " + pformat_value(val, indent + 1) + ",")
+            lines.append(level + "}")
+            return "\n".join(lines)
         if isinstance(value, (bytes, bytearray)):
             length = len(value)
-            suffix = ''
+            suffix = ""
             if truncate_after and length > truncate_after:
-                suffix = '...'
-                value = value[:truncate_to or 0]
+                suffix = "..."
+                value = value[: truncate_to or 0]
             if mostly_printable(value):
                 output = repr(value)
             else:
-                output = '0x' + binascii.hexlify(value).decode('ascii')
-            return '{} bytes {}{}'.format(length, output, suffix)
+                output = "0x" + value.hex()
+            return "{} bytes {}{}".format(length, output, suffix)
 
         return repr(value)
 
-    return '{name} ({size} bytes) {content}'.format(
+    return "{name} ({size} bytes) {content}".format(
         name=pb.__class__.__name__,
         size=pb.ByteSize(),
-        content=pformat_value(pb.__dict__, indent)
+        content=pformat_value(pb.__dict__, indent),
     )
+
+
+def value_to_proto(ftype, value):
+    if issubclass(ftype, MessageType):
+        raise TypeError("value_to_proto only converts simple values")
+
+    if ftype in (UVarintType, SVarintType):
+        return int(value)
+
+    if ftype is BoolType:
+        return bool(value)
+
+    if ftype is UnicodeType:
+        return str(value)
+
+    if ftype is BytesType:
+        if isinstance(value, str):
+            return bytes.fromhex(value)
+        elif isinstance(value, bytes):
+            return value
+        else:
+            raise TypeError("can't convert {} value to bytes".format(type(value)))
+
+
+def dict_to_proto(message_type, d):
+    params = {}
+    for fname, ftype, fflags in message_type.get_fields().values():
+        repeated = fflags & FLAG_REPEATED
+        value = d.get(fname)
+        if value is None:
+            continue
+
+        if not repeated:
+            value = [value]
+
+        if issubclass(ftype, MessageType):
+            function = dict_to_proto
+        else:
+            function = value_to_proto
+
+        newvalue = [function(ftype, v) for v in value]
+
+        if not repeated:
+            newvalue = newvalue[0]
+
+        params[fname] = newvalue
+    return message_type(**params)
+
+
+def to_dict(msg):
+    res = {}
+    for key, value in msg.__dict__.items():
+        if value is None or value == []:
+            continue
+        if isinstance(value, MessageType):
+            value = to_dict(value)
+        res[key] = value
+    return res
